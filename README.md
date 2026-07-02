@@ -66,4 +66,4 @@ Compatibility varies between games, as some titles use custom input systems or d
 
 ## License
 
-This project is released under the MIT License.
+MIT License
