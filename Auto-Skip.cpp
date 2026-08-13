@@ -11,7 +11,7 @@
 #include <cwctype>
 
 #define AUTOSKIP_NAME    "Auto-Skip"
-#define AUTOSKIP_VERSION "0.5"
+#define AUTOSKIP_VERSION "0.2"
 #define AUTOSKIP_AUTHOR  "Gametism"
 
 static std::atomic<bool> g_running = true;
@@ -194,8 +194,8 @@ static std::vector<std::wstring> SplitList(std::wstring text)
         std::wstring item = text.substr(
             start,
             comma == std::wstring::npos
-                ? std::wstring::npos
-                : comma - start
+            ? std::wstring::npos
+            : comma - start
         );
 
         item.erase(
@@ -305,7 +305,7 @@ static void RemoveDuplicateKeys()
                 unique.end(),
                 key
             ) == unique.end()
-        )
+            )
         {
             unique.push_back(key);
         }
@@ -347,16 +347,16 @@ static bool GetGameForegroundWindow(
 
     DWORD width = static_cast<DWORD>(
         std::max<LONG>(0, rect.right - rect.left)
-    );
+        );
 
     DWORD height = static_cast<DWORD>(
         std::max<LONG>(0, rect.bottom - rect.top)
-    );
+        );
 
     if (
         width < g_minWindowWidth ||
         height < g_minWindowHeight
-    )
+        )
     {
         return false;
     }
@@ -542,7 +542,7 @@ static void LoadConfig()
                 L"SPACE,ENTER,ESCAPE"
             )
         )
-    )
+        )
     {
         WORD parsed = ParseKeyboardKey(key);
 
@@ -574,7 +574,7 @@ static HANDLE CreateGlobalGuard()
             c == L':' ||
             c == L' ' ||
             c == L'.'
-        )
+            )
         {
             c = L'_';
         }
@@ -610,7 +610,7 @@ static bool IsKeyAllowedAtElapsed(
     if (
         vk == VK_RETURN &&
         elapsed < g_enterAfterMs
-    )
+        )
     {
         return false;
     }
@@ -618,7 +618,7 @@ static bool IsKeyAllowedAtElapsed(
     if (
         vk == VK_ESCAPE &&
         elapsed < g_escapeAfterMs
-    )
+        )
     {
         return false;
     }
@@ -696,7 +696,7 @@ static bool WaitForStableForeground(
                 currentForeground != lastForeground ||
                 width != lastWidth ||
                 height != lastHeight
-            )
+                )
             {
                 lastForeground = currentForeground;
                 lastWidth = width;
@@ -707,7 +707,7 @@ static bool WaitForStableForeground(
                 stableStart != 0 &&
                 GetTickCount64() - stableStart >=
                 g_foregroundStableMs
-            )
+                )
             {
                 stableWindowOut = currentForeground;
                 return true;
@@ -725,7 +725,7 @@ static bool WaitForStableForeground(
             g_waitForForegroundMs > 0 &&
             GetTickCount64() - waitStart >=
             g_waitForForegroundMs
-        )
+            )
         {
             return false;
         }
@@ -879,7 +879,7 @@ static DWORD WINAPI MainThread(LPVOID)
         if (
             g_maxKeyPresses > 0 &&
             g_keyPressesSent >= g_maxKeyPresses
-        )
+            )
         {
             Log("MaxKeyPresses reached.");
             break;
@@ -939,7 +939,7 @@ static DWORD WINAPI MainThread(LPVOID)
         if (
             g_onlyWhenGameForeground &&
             foreground != lastWindow
-        )
+            )
         {
             Log(
                 "Foreground game window changed. "
@@ -977,7 +977,7 @@ static DWORD WINAPI MainThread(LPVOID)
             if (
                 g_maxKeyPresses > 0 &&
                 g_keyPressesSent >= g_maxKeyPresses
-            )
+                )
             {
                 break;
             }
