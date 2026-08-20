@@ -1,6 +1,6 @@
 // Auto-Skip.cpp //
 // Auto-Skip by Gametism //
-// Version 0.2 //
+// Version 0.3 //
 
 #include <windows.h>
 #include <atomic>
@@ -9,19 +9,22 @@
 #include <vector>
 #include <algorithm>
 #include <cwctype>
+#include <cstdint>
 
 #define AUTOSKIP_NAME    "Auto-Skip"
-#define AUTOSKIP_VERSION "0.2"
+#define AUTOSKIP_VERSION "0.3"
 #define AUTOSKIP_AUTHOR  "Gametism"
 
 static std::atomic<bool> g_running = true;
 
 static DWORD g_startDelayMs = 0;
-static DWORD g_totalRuntimeMs = 6000;
-static DWORD g_pressIntervalMs = 10;
+static DWORD g_totalRuntimeMs = 4000;
+static DWORD g_fastBurstDurationMs = 1000;
+static DWORD g_fastIntervalMs = 5;
+static DWORD g_fallbackIntervalMs = 20;
 static DWORD g_keyHoldMs = 0;
 
-static DWORD g_foregroundStableMs = 50;
+static DWORD g_foregroundStableMs = 25;
 static DWORD g_waitForForegroundMs = 15000;
 
 static DWORD g_minWindowWidth = 640;
@@ -29,12 +32,23 @@ static DWORD g_minWindowHeight = 360;
 
 static DWORD g_enterAfterMs = 0;
 static DWORD g_escapeAfterMs = 0;
+static DWORD g_mouseAfterMs = 0;
 
-static DWORD g_maxKeyPresses = 0;
-
+static DWORD g_maxInputBursts = 0;
 static bool g_onlyWhenGameForeground = true;
 
 static std::vector<WORD> g_keyboardKeys;
+
+enum class MouseButton
+{
+    Left,
+    Right,
+    Middle,
+    X1,
+    X2
+};
+
+static std::vector<MouseButton> g_mouseButtons;
 
 static std::wstring g_modulePath;
 static std::wstring g_iniPath;
@@ -42,12 +56,13 @@ static std::wstring g_logPath;
 static std::wstring g_exePath;
 static std::wstring g_exeName;
 
-static DWORD g_keyPressesSent = 0;
-static DWORD g_inputsSent = 0;
+static DWORD g_burstsSent = 0;
+static DWORD g_keyboardPressesSent = 0;
+static DWORD g_mouseClicksSent = 0;
+static DWORD g_inputEventsSent = 0;
+static DWORD g_sendInputFailures = 0;
 
 static HANDLE g_processGuard = nullptr;
-
-static std::atomic<WORD> g_heldKey = 0;
 
 static std::string WStringToString(const std::wstring& ws)
 {
@@ -116,7 +131,6 @@ static std::wstring GetExePath()
 {
     wchar_t path[MAX_PATH]{};
     GetModuleFileNameW(nullptr, path, MAX_PATH);
-
     return path;
 }
 
@@ -136,14 +150,12 @@ static std::wstring ReplaceExtension(
 )
 {
     std::wstring result = path;
-
     size_t dot = result.find_last_of(L'.');
 
     if (dot != std::wstring::npos)
         result = result.substr(0, dot);
 
     result += newExt;
-
     return result;
 }
 
@@ -184,7 +196,6 @@ static std::wstring ReadIniString(
 static std::vector<std::wstring> SplitList(std::wstring text)
 {
     std::vector<std::wstring> result;
-
     size_t start = 0;
 
     while (start < text.size())
@@ -194,8 +205,8 @@ static std::vector<std::wstring> SplitList(std::wstring text)
         std::wstring item = text.substr(
             start,
             comma == std::wstring::npos
-            ? std::wstring::npos
-            : comma - start
+                ? std::wstring::npos
+                : comma - start
         );
 
         item.erase(
@@ -224,20 +235,18 @@ static std::vector<std::wstring> SplitList(std::wstring text)
 
 static WORD ParseKeyboardKey(const std::wstring& key)
 {
-    if (key == L"SPACE" || key == L"SPACEBAR")
-        return VK_SPACE;
-
-    if (key == L"ENTER" || key == L"RETURN")
-        return VK_RETURN;
-
-    if (key == L"ESC" || key == L"ESCAPE")
-        return VK_ESCAPE;
-
-    if (key == L"TAB")
-        return VK_TAB;
-
-    if (key == L"BACKSPACE")
-        return VK_BACK;
+    if (key == L"SPACE" || key == L"SPACEBAR") return VK_SPACE;
+    if (key == L"ENTER" || key == L"RETURN") return VK_RETURN;
+    if (key == L"ESC" || key == L"ESCAPE") return VK_ESCAPE;
+    if (key == L"TAB") return VK_TAB;
+    if (key == L"BACKSPACE") return VK_BACK;
+    if (key == L"SHIFT") return VK_SHIFT;
+    if (key == L"CTRL" || key == L"CONTROL") return VK_CONTROL;
+    if (key == L"ALT") return VK_MENU;
+    if (key == L"UP") return VK_UP;
+    if (key == L"DOWN") return VK_DOWN;
+    if (key == L"LEFT") return VK_LEFT;
+    if (key == L"RIGHT") return VK_RIGHT;
 
     if (key.length() == 1)
     {
@@ -261,24 +270,60 @@ static WORD ParseKeyboardKey(const std::wstring& key)
     return 0;
 }
 
+static bool ParseMouseButton(
+    const std::wstring& text,
+    MouseButton& buttonOut
+)
+{
+    if (text == L"LEFT" || text == L"LMB")
+    {
+        buttonOut = MouseButton::Left;
+        return true;
+    }
+
+    if (text == L"RIGHT" || text == L"RMB")
+    {
+        buttonOut = MouseButton::Right;
+        return true;
+    }
+
+    if (text == L"MIDDLE" || text == L"MMB")
+    {
+        buttonOut = MouseButton::Middle;
+        return true;
+    }
+
+    if (text == L"X1" || text == L"MOUSE4")
+    {
+        buttonOut = MouseButton::X1;
+        return true;
+    }
+
+    if (text == L"X2" || text == L"MOUSE5")
+    {
+        buttonOut = MouseButton::X2;
+        return true;
+    }
+
+    return false;
+}
+
 static std::string KeyName(WORD vk)
 {
     switch (vk)
     {
-    case VK_SPACE:
-        return "SPACE";
-
-    case VK_RETURN:
-        return "ENTER";
-
-    case VK_ESCAPE:
-        return "ESCAPE";
-
-    case VK_TAB:
-        return "TAB";
-
-    case VK_BACK:
-        return "BACKSPACE";
+    case VK_SPACE: return "SPACE";
+    case VK_RETURN: return "ENTER";
+    case VK_ESCAPE: return "ESCAPE";
+    case VK_TAB: return "TAB";
+    case VK_BACK: return "BACKSPACE";
+    case VK_SHIFT: return "SHIFT";
+    case VK_CONTROL: return "CTRL";
+    case VK_MENU: return "ALT";
+    case VK_UP: return "UP";
+    case VK_DOWN: return "DOWN";
+    case VK_LEFT: return "LEFT";
+    case VK_RIGHT: return "RIGHT";
     }
 
     if (vk >= 'A' && vk <= 'Z')
@@ -293,25 +338,44 @@ static std::string KeyName(WORD vk)
     return "VK_" + std::to_string(vk);
 }
 
+static std::string MouseButtonName(MouseButton button)
+{
+    switch (button)
+    {
+    case MouseButton::Left: return "LEFT";
+    case MouseButton::Right: return "RIGHT";
+    case MouseButton::Middle: return "MIDDLE";
+    case MouseButton::X1: return "X1";
+    case MouseButton::X2: return "X2";
+    }
+
+    return "UNKNOWN";
+}
+
 static void RemoveDuplicateKeys()
 {
     std::vector<WORD> unique;
 
     for (WORD key : g_keyboardKeys)
     {
-        if (
-            std::find(
-                unique.begin(),
-                unique.end(),
-                key
-            ) == unique.end()
-            )
-        {
+        if (std::find(unique.begin(), unique.end(), key) == unique.end())
             unique.push_back(key);
-        }
     }
 
     g_keyboardKeys.swap(unique);
+}
+
+static void RemoveDuplicateMouseButtons()
+{
+    std::vector<MouseButton> unique;
+
+    for (MouseButton button : g_mouseButtons)
+    {
+        if (std::find(unique.begin(), unique.end(), button) == unique.end())
+            unique.push_back(button);
+    }
+
+    g_mouseButtons.swap(unique);
 }
 
 static bool GetGameForegroundWindow(
@@ -322,16 +386,7 @@ static bool GetGameForegroundWindow(
 {
     HWND hwnd = GetForegroundWindow();
 
-    if (!hwnd)
-        return false;
-
-    if (!IsWindow(hwnd))
-        return false;
-
-    if (!IsWindowVisible(hwnd))
-        return false;
-
-    if (IsIconic(hwnd))
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd))
         return false;
 
     DWORD pid = 0;
@@ -345,100 +400,224 @@ static bool GetGameForegroundWindow(
     if (!GetClientRect(hwnd, &rect))
         return false;
 
-    DWORD width = static_cast<DWORD>(
-        std::max<LONG>(0, rect.right - rect.left)
-        );
+    DWORD width = static_cast<DWORD>(std::max<LONG>(0, rect.right - rect.left));
+    DWORD height = static_cast<DWORD>(std::max<LONG>(0, rect.bottom - rect.top));
 
-    DWORD height = static_cast<DWORD>(
-        std::max<LONG>(0, rect.bottom - rect.top)
-        );
-
-    if (
-        width < g_minWindowWidth ||
-        height < g_minWindowHeight
-        )
-    {
+    if (width < g_minWindowWidth || height < g_minWindowHeight)
         return false;
-    }
 
     hwndOut = hwnd;
     widthOut = width;
     heightOut = height;
+    return true;
+}
+
+static bool IsKeyAllowedAtElapsed(WORD vk, ULONGLONG elapsed)
+{
+    if (vk == VK_RETURN && elapsed < g_enterAfterMs)
+        return false;
+
+    if (vk == VK_ESCAPE && elapsed < g_escapeAfterMs)
+        return false;
 
     return true;
 }
 
-static void ReleaseHeldKey()
+static void AppendKeyboardPress(std::vector<INPUT>& inputs, WORD vk)
 {
-    WORD vk = g_heldKey.exchange(0);
-
-    if (!vk)
-        return;
-
-    INPUT up{};
-    up.type = INPUT_KEYBOARD;
-    up.ki.wVk = vk;
-    up.ki.dwFlags = KEYEVENTF_KEYUP;
-
-    SendInput(
-        1,
-        &up,
-        sizeof(INPUT)
-    );
-}
-
-static bool SendSingleKeyboardPress(WORD vk)
-{
-    ReleaseHeldKey();
-
     INPUT down{};
     down.type = INPUT_KEYBOARD;
     down.ki.wVk = vk;
+    inputs.push_back(down);
 
-    UINT sentDown = SendInput(
-        1,
-        &down,
-        sizeof(INPUT)
-    );
-
-    if (sentDown != 1)
-        return false;
-
-    g_heldKey = vk;
-
-    if (g_keyHoldMs > 0)
-        Sleep(g_keyHoldMs);
-
-    INPUT up{};
-    up.type = INPUT_KEYBOARD;
-    up.ki.wVk = vk;
+    INPUT up = down;
     up.ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs.push_back(up);
+}
 
-    UINT sentUp = SendInput(
-        1,
-        &up,
-        sizeof(INPUT)
-    );
+static void AppendMouseClick(std::vector<INPUT>& inputs, MouseButton button)
+{
+    INPUT down{};
+    INPUT up{};
+    down.type = INPUT_MOUSE;
+    up.type = INPUT_MOUSE;
 
-    g_heldKey = 0;
-
-    g_inputsSent += sentDown + sentUp;
-
-    if (sentUp == 1)
+    switch (button)
     {
-        g_keyPressesSent++;
-        return true;
+    case MouseButton::Left:
+        down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        break;
+
+    case MouseButton::Right:
+        down.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+        up.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+        break;
+
+    case MouseButton::Middle:
+        down.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
+        up.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+        break;
+
+    case MouseButton::X1:
+        down.mi.dwFlags = MOUSEEVENTF_XDOWN;
+        up.mi.dwFlags = MOUSEEVENTF_XUP;
+        down.mi.mouseData = XBUTTON1;
+        up.mi.mouseData = XBUTTON1;
+        break;
+
+    case MouseButton::X2:
+        down.mi.dwFlags = MOUSEEVENTF_XDOWN;
+        up.mi.dwFlags = MOUSEEVENTF_XUP;
+        down.mi.mouseData = XBUTTON2;
+        up.mi.mouseData = XBUTTON2;
+        break;
     }
 
-    return false;
+    inputs.push_back(down);
+    inputs.push_back(up);
+}
+
+static bool SendFastInputBurst(ULONGLONG elapsed)
+{
+    std::vector<INPUT> inputs;
+    DWORD keyboardPresses = 0;
+    DWORD mouseClicks = 0;
+
+    inputs.reserve((g_keyboardKeys.size() + g_mouseButtons.size()) * 2);
+
+    for (WORD vk : g_keyboardKeys)
+    {
+        if (!IsKeyAllowedAtElapsed(vk, elapsed))
+            continue;
+
+        AppendKeyboardPress(inputs, vk);
+        keyboardPresses++;
+    }
+
+    if (elapsed >= g_mouseAfterMs)
+    {
+        for (MouseButton button : g_mouseButtons)
+        {
+            AppendMouseClick(inputs, button);
+            mouseClicks++;
+        }
+    }
+
+    if (inputs.empty())
+        return false;
+
+    // Keep each burst bounded even if a user manually configures a huge list.
+    constexpr size_t MAX_EVENTS_PER_BURST = 32;
+    if (inputs.size() > MAX_EVENTS_PER_BURST)
+        inputs.resize(MAX_EVENTS_PER_BURST);
+
+    SetLastError(ERROR_SUCCESS);
+
+    UINT sent = SendInput(
+        static_cast<UINT>(inputs.size()),
+        inputs.data(),
+        sizeof(INPUT)
+    );
+
+    g_inputEventsSent += sent;
+
+    if (sent != inputs.size())
+    {
+        g_sendInputFailures++;
+
+        if (g_sendInputFailures <= 5)
+        {
+            Log(
+                "SendInput partial/failed burst. Sent " +
+                std::to_string(sent) + "/" +
+                std::to_string(inputs.size()) +
+                ", GetLastError=" +
+                std::to_string(GetLastError())
+            );
+        }
+
+        return false;
+    }
+
+    g_burstsSent++;
+    g_keyboardPressesSent += keyboardPresses;
+    g_mouseClicksSent += mouseClicks;
+    return true;
+}
+
+static bool SendHeldKeyboardSequence(ULONGLONG elapsed)
+{
+    bool sentAny = false;
+
+    for (WORD vk : g_keyboardKeys)
+    {
+        if (!IsKeyAllowedAtElapsed(vk, elapsed))
+            continue;
+
+        INPUT down{};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wVk = vk;
+
+        INPUT up = down;
+        up.ki.dwFlags = KEYEVENTF_KEYUP;
+
+        if (SendInput(1, &down, sizeof(INPUT)) != 1)
+        {
+            g_sendInputFailures++;
+            continue;
+        }
+
+        g_inputEventsSent++;
+        Sleep(g_keyHoldMs);
+
+        if (SendInput(1, &up, sizeof(INPUT)) == 1)
+        {
+            g_inputEventsSent++;
+            g_keyboardPressesSent++;
+            sentAny = true;
+        }
+    }
+
+    if (elapsed >= g_mouseAfterMs && !g_mouseButtons.empty())
+    {
+        std::vector<INPUT> mouseInputs;
+        mouseInputs.reserve(g_mouseButtons.size() * 2);
+
+        for (MouseButton button : g_mouseButtons)
+            AppendMouseClick(mouseInputs, button);
+
+        if (!mouseInputs.empty())
+        {
+            UINT sent = SendInput(
+                static_cast<UINT>(mouseInputs.size()),
+                mouseInputs.data(),
+                sizeof(INPUT)
+            );
+
+            g_inputEventsSent += sent;
+
+            if (sent == mouseInputs.size())
+            {
+                g_mouseClicksSent += static_cast<DWORD>(g_mouseButtons.size());
+                sentAny = true;
+            }
+            else
+            {
+                g_sendInputFailures++;
+            }
+        }
+    }
+
+    if (sentAny)
+        g_burstsSent++;
+
+    return sentAny;
 }
 
 static bool ShouldRunForThisExe()
 {
-    std::wstring targetExe = ReadIniString(
-        L"TargetExe",
-        L""
-    );
+    std::wstring targetExe = ReadIniString(L"TargetExe", L"");
 
     if (targetExe.empty())
         return true;
@@ -448,118 +627,92 @@ static bool ShouldRunForThisExe()
 
 static void LoadConfig()
 {
-    g_startDelayMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"StartDelayMs",
-        0,
-        g_iniPath.c_str()
-    );
+    g_startDelayMs = GetPrivateProfileIntW(L"AutoSkip", L"StartDelayMs", 0, g_iniPath.c_str());
+    g_totalRuntimeMs = GetPrivateProfileIntW(L"AutoSkip", L"TotalRuntimeMs", 4000, g_iniPath.c_str());
+    g_fastBurstDurationMs = GetPrivateProfileIntW(L"AutoSkip", L"FastBurstDurationMs", 1000, g_iniPath.c_str());
+    g_fastIntervalMs = GetPrivateProfileIntW(L"AutoSkip", L"FastIntervalMs", 5, g_iniPath.c_str());
+    g_fallbackIntervalMs = GetPrivateProfileIntW(L"AutoSkip", L"FallbackIntervalMs", 20, g_iniPath.c_str());
+    g_keyHoldMs = GetPrivateProfileIntW(L"AutoSkip", L"KeyHoldMs", 0, g_iniPath.c_str());
 
-    g_totalRuntimeMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"TotalRuntimeMs",
-        6000,
-        g_iniPath.c_str()
-    );
-
-    g_pressIntervalMs = GetPrivateProfileIntW(
+    // Backward compatibility with v0.2: if PressIntervalMs exists and the new
+    // interval settings are absent, use it for the fallback phase.
+    wchar_t legacyBuffer[32]{};
+    GetPrivateProfileStringW(
         L"AutoSkip",
         L"PressIntervalMs",
-        10,
+        L"",
+        legacyBuffer,
+        static_cast<DWORD>(std::size(legacyBuffer)),
         g_iniPath.c_str()
     );
 
-    g_keyHoldMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"KeyHoldMs",
-        0,
-        g_iniPath.c_str()
-    );
+    if (legacyBuffer[0] != L'\0')
+    {
+        wchar_t fastBuffer[32]{};
+        wchar_t fallbackBuffer[32]{};
 
-    g_foregroundStableMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"ForegroundStableMs",
-        50,
-        g_iniPath.c_str()
-    );
+        GetPrivateProfileStringW(L"AutoSkip", L"FastIntervalMs", L"", fastBuffer, static_cast<DWORD>(std::size(fastBuffer)), g_iniPath.c_str());
+        GetPrivateProfileStringW(L"AutoSkip", L"FallbackIntervalMs", L"", fallbackBuffer, static_cast<DWORD>(std::size(fallbackBuffer)), g_iniPath.c_str());
 
-    g_waitForForegroundMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"WaitForForegroundMs",
-        15000,
-        g_iniPath.c_str()
-    );
+        DWORD legacy = static_cast<DWORD>(_wtoi(legacyBuffer));
 
-    g_minWindowWidth = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"MinWindowWidth",
-        640,
-        g_iniPath.c_str()
-    );
+        if (fastBuffer[0] == L'\0')
+            g_fastIntervalMs = legacy;
 
-    g_minWindowHeight = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"MinWindowHeight",
-        360,
-        g_iniPath.c_str()
-    );
+        if (fallbackBuffer[0] == L'\0')
+            g_fallbackIntervalMs = legacy;
+    }
 
-    g_enterAfterMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"EnterAfterMs",
-        0,
-        g_iniPath.c_str()
-    );
-
-    g_escapeAfterMs = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"EscapeAfterMs",
-        0,
-        g_iniPath.c_str()
-    );
-
-    g_maxKeyPresses = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"MaxKeyPresses",
-        0,
-        g_iniPath.c_str()
-    );
-
-    g_onlyWhenGameForeground = GetPrivateProfileIntW(
-        L"AutoSkip",
-        L"OnlyWhenGameForeground",
-        1,
-        g_iniPath.c_str()
-    ) != 0;
+    g_foregroundStableMs = GetPrivateProfileIntW(L"AutoSkip", L"ForegroundStableMs", 25, g_iniPath.c_str());
+    g_waitForForegroundMs = GetPrivateProfileIntW(L"AutoSkip", L"WaitForForegroundMs", 15000, g_iniPath.c_str());
+    g_minWindowWidth = GetPrivateProfileIntW(L"AutoSkip", L"MinWindowWidth", 640, g_iniPath.c_str());
+    g_minWindowHeight = GetPrivateProfileIntW(L"AutoSkip", L"MinWindowHeight", 360, g_iniPath.c_str());
+    g_enterAfterMs = GetPrivateProfileIntW(L"AutoSkip", L"EnterAfterMs", 0, g_iniPath.c_str());
+    g_escapeAfterMs = GetPrivateProfileIntW(L"AutoSkip", L"EscapeAfterMs", 0, g_iniPath.c_str());
+    g_mouseAfterMs = GetPrivateProfileIntW(L"AutoSkip", L"MouseAfterMs", 0, g_iniPath.c_str());
+    g_maxInputBursts = GetPrivateProfileIntW(L"AutoSkip", L"MaxInputBursts", 0, g_iniPath.c_str());
+    g_onlyWhenGameForeground = GetPrivateProfileIntW(L"AutoSkip", L"OnlyWhenGameForeground", 1, g_iniPath.c_str()) != 0;
 
     g_keyboardKeys.clear();
 
-    for (
-        const auto& key :
-        SplitList(
-            ReadIniString(
-                L"KeyboardKeys",
-                L"SPACE,ENTER,ESCAPE"
-            )
-        )
-        )
+    for (const auto& key : SplitList(ReadIniString(L"KeyboardKeys", L"SPACE,ENTER,ESCAPE")))
     {
         WORD parsed = ParseKeyboardKey(key);
-
         if (parsed)
             g_keyboardKeys.push_back(parsed);
     }
 
     RemoveDuplicateKeys();
 
-    if (g_pressIntervalMs < 10)
-        g_pressIntervalMs = 10;
+    g_mouseButtons.clear();
+
+    for (const auto& buttonName : SplitList(ReadIniString(L"MouseButtons", L"LEFT")))
+    {
+        MouseButton button{};
+        if (ParseMouseButton(buttonName, button))
+            g_mouseButtons.push_back(button);
+    }
+
+    RemoveDuplicateMouseButtons();
+
+    // Stability clamps. Auto-Skip is designed to be fast, not an unbounded input flood.
+    if (g_fastIntervalMs < 5)
+        g_fastIntervalMs = 5;
+
+    if (g_fallbackIntervalMs < 10)
+        g_fallbackIntervalMs = 10;
 
     if (g_keyHoldMs > 250)
         g_keyHoldMs = 250;
 
     if (g_totalRuntimeMs < 1)
         g_totalRuntimeMs = 1;
+
+    if (g_fastBurstDurationMs > g_totalRuntimeMs)
+        g_fastBurstDurationMs = g_totalRuntimeMs;
+
+    if (g_foregroundStableMs > 5000)
+        g_foregroundStableMs = 5000;
 }
 
 static HANDLE CreateGlobalGuard()
@@ -568,27 +721,13 @@ static HANDLE CreateGlobalGuard()
 
     for (wchar_t& c : guardKey)
     {
-        if (
-            c == L'\\' ||
-            c == L'/' ||
-            c == L':' ||
-            c == L' ' ||
-            c == L'.'
-            )
-        {
+        if (c == L'\\' || c == L'/' || c == L':' || c == L' ' || c == L'.')
             c = L'_';
-        }
     }
 
-    std::wstring mutexName =
-        L"Local\\Gametism_AutoSkip_" +
-        guardKey;
+    std::wstring mutexName = L"Local\\Gametism_AutoSkip_" + guardKey;
 
-    HANDLE mutex = CreateMutexW(
-        nullptr,
-        TRUE,
-        mutexName.c_str()
-    );
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
 
     if (!mutex)
         return nullptr;
@@ -602,69 +741,12 @@ static HANDLE CreateGlobalGuard()
     return mutex;
 }
 
-static bool IsKeyAllowedAtElapsed(
-    WORD vk,
-    ULONGLONG elapsed
-)
-{
-    if (
-        vk == VK_RETURN &&
-        elapsed < g_enterAfterMs
-        )
-    {
-        return false;
-    }
-
-    if (
-        vk == VK_ESCAPE &&
-        elapsed < g_escapeAfterMs
-        )
-    {
-        return false;
-    }
-
-    return true;
-}
-
-static WORD ChooseNextAllowedKey(
-    size_t& keyIndex,
-    ULONGLONG elapsed
-)
-{
-    if (g_keyboardKeys.empty())
-        return 0;
-
-    size_t attempts = 0;
-
-    while (attempts < g_keyboardKeys.size())
-    {
-        WORD candidate =
-            g_keyboardKeys[keyIndex];
-
-        keyIndex++;
-
-        if (keyIndex >= g_keyboardKeys.size())
-            keyIndex = 0;
-
-        attempts++;
-
-        if (IsKeyAllowedAtElapsed(candidate, elapsed))
-            return candidate;
-    }
-
-    return 0;
-}
-
-static bool WaitForStableForeground(
-    HWND& stableWindowOut
-)
+static bool WaitForStableForeground(HWND& stableWindowOut)
 {
     HWND currentForeground = nullptr;
     HWND lastForeground = nullptr;
-
     DWORD width = 0;
     DWORD height = 0;
-
     DWORD lastWidth = 0;
     DWORD lastHeight = 0;
 
@@ -676,13 +758,7 @@ static bool WaitForStableForeground(
         bool allowed = true;
 
         if (g_onlyWhenGameForeground)
-        {
-            allowed = GetGameForegroundWindow(
-                currentForeground,
-                width,
-                height
-            );
-        }
+            allowed = GetGameForegroundWindow(currentForeground, width, height);
 
         if (allowed)
         {
@@ -692,22 +768,14 @@ static bool WaitForStableForeground(
                 return true;
             }
 
-            if (
-                currentForeground != lastForeground ||
-                width != lastWidth ||
-                height != lastHeight
-                )
+            if (currentForeground != lastForeground || width != lastWidth || height != lastHeight)
             {
                 lastForeground = currentForeground;
                 lastWidth = width;
                 lastHeight = height;
                 stableStart = GetTickCount64();
             }
-            else if (
-                stableStart != 0 &&
-                GetTickCount64() - stableStart >=
-                g_foregroundStableMs
-                )
+            else if (stableStart != 0 && GetTickCount64() - stableStart >= g_foregroundStableMs)
             {
                 stableWindowOut = currentForeground;
                 return true;
@@ -721,71 +789,86 @@ static bool WaitForStableForeground(
             stableStart = 0;
         }
 
-        if (
-            g_waitForForegroundMs > 0 &&
-            GetTickCount64() - waitStart >=
-            g_waitForForegroundMs
-            )
-        {
+        if (g_waitForForegroundMs > 0 && GetTickCount64() - waitStart >= g_waitForForegroundMs)
             return false;
-        }
 
-        Sleep(25);
+        Sleep(10);
     }
 
     return false;
 }
 
+static void PreciseWaitMs(DWORD milliseconds)
+{
+    if (milliseconds == 0)
+        return;
+
+    LARGE_INTEGER frequency{};
+    LARGE_INTEGER start{};
+
+    if (!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&start))
+    {
+        Sleep(milliseconds);
+        return;
+    }
+
+    const double targetSeconds = static_cast<double>(milliseconds) / 1000.0;
+
+    while (g_running)
+    {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+
+        double elapsedSeconds =
+            static_cast<double>(now.QuadPart - start.QuadPart) /
+            static_cast<double>(frequency.QuadPart);
+
+        double remainingMs = (targetSeconds - elapsedSeconds) * 1000.0;
+
+        if (remainingMs <= 0.0)
+            break;
+
+        if (remainingMs > 2.0)
+            Sleep(1);
+        else
+            SwitchToThread();
+    }
+}
+
+static void CleanupGuard()
+{
+    if (!g_processGuard)
+        return;
+
+    ReleaseMutex(g_processGuard);
+    CloseHandle(g_processGuard);
+    g_processGuard = nullptr;
+}
+
 static DWORD WINAPI MainThread(LPVOID)
 {
     g_modulePath = GetThisModulePath();
-    g_iniPath = ReplaceExtension(
-        g_modulePath,
-        L".ini"
-    );
-    g_logPath = ReplaceExtension(
-        g_modulePath,
-        L".log"
-    );
-
+    g_iniPath = ReplaceExtension(g_modulePath, L".ini");
+    g_logPath = ReplaceExtension(g_modulePath, L".log");
     g_exePath = GetExePath();
     g_exeName = GetFileNameOnly(g_exePath);
 
     {
-        std::ofstream clear(
-            WStringToString(g_logPath),
-            std::ios::trunc
-        );
+        std::ofstream clear(WStringToString(g_logPath), std::ios::trunc);
     }
 
     LoadConfig();
 
     Log("------------------------------------------------");
-    Log(
-        std::string(AUTOSKIP_NAME) +
-        " by " +
-        AUTOSKIP_AUTHOR
-    );
-    Log(
-        "Version " +
-        std::string(AUTOSKIP_VERSION)
-    );
+    Log(std::string(AUTOSKIP_NAME) + " by " + AUTOSKIP_AUTHOR);
+    Log("Version " + std::string(AUTOSKIP_VERSION));
     Log("------------------------------------------------");
-    Log(
-        "EXE: " +
-        WStringToString(g_exeName)
-    );
-    Log(
-        "INI: " +
-        WStringToString(g_iniPath)
-    );
+    Log("EXE: " + WStringToString(g_exeName));
+    Log("INI: " + WStringToString(g_iniPath));
 
     if (!ShouldRunForThisExe())
     {
-        Log(
-            "TargetExe does not match. "
-            "Auto-Skip disabled for this process."
-        );
+        Log("TargetExe does not match. Auto-Skip disabled for this process.");
         return 0;
     }
 
@@ -793,55 +876,54 @@ static DWORD WINAPI MainThread(LPVOID)
 
     if (!g_processGuard)
     {
-        Log(
-            "Another Auto-Skip instance is already active "
-            "for this game executable."
-        );
+        Log("Another Auto-Skip instance is already active for this game executable.");
         return 0;
     }
 
-    if (g_keyboardKeys.empty())
+    if (g_keyboardKeys.empty() && g_mouseButtons.empty())
     {
-        Log(
-            "No valid KeyboardKeys configured. "
-            "Auto-Skip disabled."
-        );
-
-        ReleaseMutex(g_processGuard);
-        CloseHandle(g_processGuard);
-        g_processGuard = nullptr;
-
+        Log("No valid KeyboardKeys or MouseButtons configured. Auto-Skip disabled.");
+        CleanupGuard();
         return 0;
     }
 
     Log("Auto-Skip active.");
-    Log("Input mode: priority/fallback cycling.");
-    Log(
-        "Press interval: " +
-        std::to_string(g_pressIntervalMs) +
-        " ms"
-    );
-    Log(
-        "Key hold: " +
-        std::to_string(g_keyHoldMs) +
-        " ms"
-    );
-    Log(
-        "Enter enabled after: " +
-        std::to_string(g_enterAfterMs) +
-        " ms"
-    );
-    Log(
-        "Escape enabled after: " +
-        std::to_string(g_escapeAfterMs) +
-        " ms"
-    );
-    Log(
-        "Minimum window size: " +
-        std::to_string(g_minWindowWidth) +
-        "x" +
-        std::to_string(g_minWindowHeight)
-    );
+    Log("Mode: low-latency bounded input burst.");
+    Log("Fast burst duration: " + std::to_string(g_fastBurstDurationMs) + " ms");
+    Log("Fast interval: " + std::to_string(g_fastIntervalMs) + " ms");
+    Log("Fallback interval: " + std::to_string(g_fallbackIntervalMs) + " ms");
+    Log("Total runtime: " + std::to_string(g_totalRuntimeMs) + " ms");
+    Log("Minimum window size: " + std::to_string(g_minWindowWidth) + "x" + std::to_string(g_minWindowHeight));
+
+    std::string keys = "Keyboard: ";
+    if (g_keyboardKeys.empty())
+    {
+        keys += "disabled";
+    }
+    else
+    {
+        for (size_t i = 0; i < g_keyboardKeys.size(); ++i)
+        {
+            if (i > 0) keys += ",";
+            keys += KeyName(g_keyboardKeys[i]);
+        }
+    }
+    Log(keys);
+
+    std::string mouse = "Mouse: ";
+    if (g_mouseButtons.empty())
+    {
+        mouse += "disabled";
+    }
+    else
+    {
+        for (size_t i = 0; i < g_mouseButtons.size(); ++i)
+        {
+            if (i > 0) mouse += ",";
+            mouse += MouseButtonName(g_mouseButtons[i]);
+        }
+    }
+    Log(mouse);
 
     if (g_startDelayMs > 0)
         Sleep(g_startDelayMs);
@@ -850,15 +932,8 @@ static DWORD WINAPI MainThread(LPVOID)
 
     if (!WaitForStableForeground(stableWindow))
     {
-        Log(
-            "Timed out waiting for a stable "
-            "foreground game window."
-        );
-
-        ReleaseMutex(g_processGuard);
-        CloseHandle(g_processGuard);
-        g_processGuard = nullptr;
-
+        Log("Timed out waiting for a stable foreground game window.");
+        CleanupGuard();
         return 0;
     }
 
@@ -867,158 +942,110 @@ static DWORD WINAPI MainThread(LPVOID)
     ULONGLONG startTime = GetTickCount64();
     HWND lastWindow = stableWindow;
     bool focusWasLost = false;
+    bool loggedFallback = false;
 
     while (g_running)
     {
-        ULONGLONG elapsed =
-            GetTickCount64() - startTime;
+        ULONGLONG elapsed = GetTickCount64() - startTime;
 
         if (elapsed >= g_totalRuntimeMs)
             break;
 
-        if (
-            g_maxKeyPresses > 0 &&
-            g_keyPressesSent >= g_maxKeyPresses
-            )
+        if (g_maxInputBursts > 0 && g_burstsSent >= g_maxInputBursts)
         {
-            Log("MaxKeyPresses reached.");
+            Log("MaxInputBursts reached.");
             break;
         }
 
         bool allowed = true;
-
         HWND foreground = nullptr;
         DWORD width = 0;
         DWORD height = 0;
 
         if (g_onlyWhenGameForeground)
-        {
-            allowed = GetGameForegroundWindow(
-                foreground,
-                width,
-                height
-            );
-        }
+            allowed = GetGameForegroundWindow(foreground, width, height);
 
         if (!allowed)
         {
             if (!focusWasLost)
             {
-                Log(
-                    "Game focus/window lost. "
-                    "Input paused."
-                );
+                Log("Game focus/window lost. Input paused.");
                 focusWasLost = true;
             }
 
-            ReleaseHeldKey();
-
             HWND reacquired = nullptr;
 
             if (!WaitForStableForeground(reacquired))
             {
-                Log(
-                    "Timed out waiting for the game "
-                    "window to become stable again."
-                );
-                break;
-            }
-
-            foreground = reacquired;
-            lastWindow = foreground;
-            focusWasLost = false;
-
-            Log(
-                "Game foreground/window reacquired. "
-                "Input resumed."
-            );
-
-            continue;
-        }
-
-        if (
-            g_onlyWhenGameForeground &&
-            foreground != lastWindow
-            )
-        {
-            Log(
-                "Foreground game window changed. "
-                "Re-validating."
-            );
-
-            ReleaseHeldKey();
-
-            HWND reacquired = nullptr;
-
-            if (!WaitForStableForeground(reacquired))
-            {
-                Log(
-                    "Timed out waiting for the new "
-                    "game window to stabilize."
-                );
+                Log("Timed out waiting for the game window to become stable again.");
                 break;
             }
 
             lastWindow = reacquired;
-
-            Log("New game window stabilized.");
-
+            focusWasLost = false;
+            Log("Game foreground/window reacquired. Input resumed.");
             continue;
         }
 
-        // Fast sequential burst:
-        // send every currently-allowed key as its own complete press.
-        // Unlike v0.1, keys are never held down together.
-        for (WORD vk : g_keyboardKeys)
+        if (g_onlyWhenGameForeground && foreground != lastWindow)
         {
-            if (!IsKeyAllowedAtElapsed(vk, elapsed))
-                continue;
+            Log("Foreground game window changed. Re-validating.");
 
-            if (
-                g_maxKeyPresses > 0 &&
-                g_keyPressesSent >= g_maxKeyPresses
-                )
+            HWND reacquired = nullptr;
+
+            if (!WaitForStableForeground(reacquired))
             {
+                Log("Timed out waiting for the new game window to stabilize.");
                 break;
             }
 
-            if (SendSingleKeyboardPress(vk))
+            lastWindow = reacquired;
+            Log("New game window stabilized.");
+            continue;
+        }
+
+        bool sent = false;
+
+        if (g_keyHoldMs == 0)
+            sent = SendFastInputBurst(elapsed);
+        else
+            sent = SendHeldKeyboardSequence(elapsed);
+
+        if (sent && g_burstsSent <= 8)
+        {
+            Log(
+                "Burst #" +
+                std::to_string(g_burstsSent) +
+                " at " +
+                std::to_string(elapsed) +
+                " ms"
+            );
+        }
+
+        DWORD interval = g_fastIntervalMs;
+
+        if (elapsed >= g_fastBurstDurationMs)
+        {
+            interval = g_fallbackIntervalMs;
+
+            if (!loggedFallback)
             {
-                if (g_keyPressesSent <= 12)
-                {
-                    Log(
-                        "Sent: " +
-                        KeyName(vk) +
-                        " at " +
-                        std::to_string(elapsed) +
-                        " ms"
-                    );
-                }
+                Log("Fast burst complete. Entering fallback phase.");
+                loggedFallback = true;
             }
         }
 
-        Sleep(g_pressIntervalMs);
+        PreciseWaitMs(interval);
     }
-
-    ReleaseHeldKey();
 
     Log("Finished.");
-    Log(
-        "Key presses sent: " +
-        std::to_string(g_keyPressesSent)
-    );
-    Log(
-        "Input events sent: " +
-        std::to_string(g_inputsSent)
-    );
+    Log("Bursts sent: " + std::to_string(g_burstsSent));
+    Log("Keyboard presses sent: " + std::to_string(g_keyboardPressesSent));
+    Log("Mouse clicks sent: " + std::to_string(g_mouseClicksSent));
+    Log("Input events sent: " + std::to_string(g_inputEventsSent));
+    Log("SendInput failures: " + std::to_string(g_sendInputFailures));
 
-    if (g_processGuard)
-    {
-        ReleaseMutex(g_processGuard);
-        CloseHandle(g_processGuard);
-        g_processGuard = nullptr;
-    }
-
+    CleanupGuard();
     return 0;
 }
 
@@ -1046,9 +1073,8 @@ BOOL APIENTRY DllMain(
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
+        // Keep DLL detach minimal. No SendInput or other loader-sensitive work here.
         g_running = false;
-
-        ReleaseHeldKey();
     }
 
     return TRUE;

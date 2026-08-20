@@ -1,118 +1,127 @@
 # Auto-Skip
 
-**Auto-Skip** is a lightweight ASI plugin that automatically skips startup videos, splash screens, legal notices, epilepsy warnings, and "Press Any Button" screens by simulating configurable keyboard input during game startup.
+**Auto-Skip** is a lightweight ASI plugin that automatically advances skippable startup videos, splash screens, legal notices, epilepsy warnings, and "Press Any Button" screens by sending configurable input during game startup.
 
-Unlike mods that replace or remove video files, Auto-Skip works entirely through automated input, requiring no modifications to the game's assets.
+Version **0.3** is focused on one goal: **skip skippable startup screens as quickly as practical while keeping the input loop bounded and conservative enough for general game compatibility.**
 
 ## Features
 
-- Automatically skips startup logos and intro videos.
-- Bypasses many warning screens and "Press Any Button" prompts.
-- Supports multiple configurable keyboard keys.
-- Sends each key as an individual press to prevent conflicting simultaneous inputs.
+- Very fast initial input burst designed to catch the first frame a splash screen becomes skippable.
+- Slower fallback phase for screens that only begin accepting input later.
+- Configurable keyboard input.
+- Mouse input support: Left, Right, Middle, Mouse 4, and Mouse 5.
+- Keyboard and mouse press/release events are batched into a single `SendInput` call when `KeyHoldMs=0`.
+- Minimum interval clamps prevent accidental zero-delay input flooding.
 - Only sends input while the game window is active and in the foreground.
-- Automatically pauses if the game loses focus and resumes once the game window is active again.
-- Ignores small launcher or configuration windows based on configurable minimum window dimensions.
-- Prevents multiple Auto-Skip instances from running simultaneously for the same game executable.
-- Automatically stops after a configurable duration.
-- Configurable through a simple INI file.
-- Lightweight standalone ASI plugin.
-- No game files are modified.
-- Compatible with games that support ASI plugins and accept keyboard input during startup.
+- Automatically pauses if the game loses focus and resumes after the game window is stable again.
+- Ignores small launcher/configuration windows using configurable minimum dimensions.
+- Prevents multiple Auto-Skip instances from running simultaneously for the same executable.
+- Automatically stops after a configurable startup window.
+- Logs partial or failed `SendInput` calls for troubleshooting.
+- Does not patch game memory, hook game functions, modify game files, or alter the game's input code.
 
 ## How It Works
 
-When the game launches, Auto-Skip waits until a valid game window is active and in the foreground. During the configured active period, it repeatedly simulates the configured keyboard inputs, such as **Space**, **Enter**, and **Escape**.
+After the game window becomes active, Auto-Skip enters a short high-speed phase. During that phase it repeatedly sends complete press/release pairs for the configured keyboard and mouse inputs.
 
-Each configured key is sent as a separate press and release rather than all keys being held simultaneously. This allows Auto-Skip to remain fast while reducing the chance of unintended input behavior during startup.
+With the default configuration, the first second uses a **5 ms interval**. Auto-Skip then switches to a gentler **20 ms fallback interval** for the remainder of the configured four-second startup window.
 
-If the game loses focus or its active window changes, Auto-Skip temporarily stops sending input until a valid game window is detected again.
-
-After the configured duration has elapsed, Auto-Skip stops sending input and remains inactive for the rest of the game session.
+This does not make an unskippable screen skippable. It is designed to make screens that already accept player input advance almost as soon as the game begins accepting that input.
 
 ## Installation
 
-1. Install an ASI Loader if your game does not already use one.
-2. Copy `Auto-Skip.asi` and `Auto-Skip.ini` into the game's executable directory.
+1. Install an ASI Loader if the game does not already use one.
+2. Copy `AutoSkip.asi` and `AutoSkip.ini` into the game's executable directory.
 3. Launch the game.
 
 ## Configuration
-
-Example:
 
 ```ini
 [AutoSkip]
 TargetExe=
 
 StartDelayMs=0
-TotalRuntimeMs=5000
+TotalRuntimeMs=4000
 
-PressIntervalMs=10
+FastBurstDurationMs=1000
+FastIntervalMs=5
+FallbackIntervalMs=20
 KeyHoldMs=0
 
 OnlyWhenGameForeground=1
-ForegroundStableMs=50
+ForegroundStableMs=25
 WaitForForegroundMs=15000
 
 MinWindowWidth=640
 MinWindowHeight=360
 
 KeyboardKeys=SPACE,ENTER,ESCAPE
+MouseButtons=LEFT
+
 EnterAfterMs=0
 EscapeAfterMs=0
+MouseAfterMs=0
 
-MaxKeyPresses=0
+MaxInputBursts=0
 ```
 
-### Available Settings
+### Settings
 
 | Setting | Description |
 | --- | --- |
-| `TargetExe` | Optional executable name restriction. Leave empty to allow the plugin to run in the process in which it is loaded. |
-| `StartDelayMs` | Delay before Auto-Skip begins processing startup input. |
-| `TotalRuntimeMs` | Total active time before Auto-Skip automatically stops. |
-| `PressIntervalMs` | Delay between each sequence of configured key presses. |
-| `KeyHoldMs` | How long each individual key is held before release. Set to `0` for immediate press/release. |
+| `TargetExe` | Optional executable-name restriction. Leave empty to use the process in which Auto-Skip is loaded. |
+| `StartDelayMs` | Optional delay before Auto-Skip begins looking for the game window. |
+| `TotalRuntimeMs` | Total active startup period. |
+| `FastBurstDurationMs` | Length of the initial high-speed phase. |
+| `FastIntervalMs` | Interval between bursts during the fast phase. Values below 5 ms are clamped to 5 ms. |
+| `FallbackIntervalMs` | Interval after the fast phase. Values below 10 ms are clamped to 10 ms. |
+| `KeyHoldMs` | Optional keyboard hold duration. `0` enables the fastest batched press/release path. |
 | `OnlyWhenGameForeground` | Only sends input while a valid game window is in the foreground. |
-| `ForegroundStableMs` | How long the game window must remain stable before Auto-Skip begins or resumes sending input. |
-| `WaitForForegroundMs` | Maximum time Auto-Skip waits for a valid foreground game window. |
-| `MinWindowWidth` | Minimum game-window client width accepted by Auto-Skip. |
-| `MinWindowHeight` | Minimum game-window client height accepted by Auto-Skip. |
-| `KeyboardKeys` | Comma-separated list of keyboard keys to simulate. |
-| `EnterAfterMs` | Delay before Enter becomes eligible for automated input. |
-| `EscapeAfterMs` | Delay before Escape becomes eligible for automated input. |
-| `MaxKeyPresses` | Maximum number of simulated key presses. Set to `0` for no additional limit. |
+| `ForegroundStableMs` | How long the game window must remain stable before input begins/resumes. |
+| `WaitForForegroundMs` | Maximum time to wait for a usable game window. |
+| `MinWindowWidth` | Minimum accepted game-window width. |
+| `MinWindowHeight` | Minimum accepted game-window height. |
+| `KeyboardKeys` | Comma-separated keyboard keys. Leave empty to disable keyboard input. |
+| `MouseButtons` | Comma-separated mouse buttons. Leave empty to disable mouse input. |
+| `EnterAfterMs` | Delay before Enter becomes eligible. |
+| `EscapeAfterMs` | Delay before Escape becomes eligible. |
+| `MouseAfterMs` | Delay before configured mouse clicks become eligible. |
+| `MaxInputBursts` | Optional hard cap on successful bursts. `0` means the runtime limit is used instead. |
 
-### Supported Keys
-
-Auto-Skip currently recognizes:
+### Supported Keyboard Keys
 
 - `SPACE`
 - `ENTER` / `RETURN`
 - `ESC` / `ESCAPE`
 - `TAB`
 - `BACKSPACE`
+- `SHIFT`
+- `CTRL` / `CONTROL`
+- `ALT`
+- `UP`, `DOWN`, `LEFT`, `RIGHT`
 - `A-Z`
 - `0-9`
 - `F1-F24`
 
-Multiple keys can be specified using commas:
+### Supported Mouse Buttons
 
-```ini
-KeyboardKeys=SPACE,ENTER,ESCAPE
-```
+- `LEFT` / `LMB`
+- `RIGHT` / `RMB`
+- `MIDDLE` / `MMB`
+- `X1` / `MOUSE4`
+- `X2` / `MOUSE5`
 
-## Compatibility
+## Compatibility and Stability
 
-Auto-Skip works with games that:
+Auto-Skip uses the Windows `SendInput` API only. It does not write to game memory or interfere with game code.
 
-- Support ASI plugins.
-- Accept simulated keyboard input during startup.
-- Allow startup videos, splash screens, warnings, or prompts to be skipped using keyboard input.
+The default 5 ms fast interval is intentionally aggressive but bounded. Auto-Skip will not accept a fast interval below 5 ms, and every normal burst contains complete down/up pairs so keys and mouse buttons are not intentionally left held.
 
-Compatibility varies between games. Some titles use custom input systems, ignore simulated keyboard input, or prevent startup sequences from being skipped entirely.
+Some games use input systems that do not accept synthetic Windows input. Some startup sequences are also intentionally unskippable. Auto-Skip cannot bypass those restrictions.
 
-Auto-Skip does not modify or remove the underlying videos, images, or game assets. It can only skip screens that the game itself allows to be advanced through keyboard input.
+## Backward Compatibility
+
+Existing v0.2 INI files remain usable. If `PressIntervalMs` is present and the new interval settings are absent, Auto-Skip uses the old value for the v0.3 timing phases, subject to the new safety clamps.
 
 ## License
 

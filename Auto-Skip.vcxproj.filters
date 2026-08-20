@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{B8CBB9CF-EDB6-454E-B53A-B94226E94F27}</UniqueIdentifier>
+      <Extensions>cpp;c;cxx;cc</Extensions>
+    </Filter>
+    <Filter Include="Configuration Files">
+      <UniqueIdentifier>{0EA28FC9-EC76-4B67-B86B-DBF36E2D1EAF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Documentation">
+      <UniqueIdentifier>{C53570B5-1D71-48FC-BFD4-890D029D078A}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Auto-Skip.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="AutoSkip.ini">
+      <Filter>Configuration Files</Filter>
+    </None>
+    <None Include="README.md">
+      <Filter>Documentation</Filter>
+    </None>
+  </ItemGroup>
+</Project>
